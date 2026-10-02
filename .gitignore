@@ -1,0 +1,39 @@
+# --- Secrets and credentials -------------------------------------------------
+# Service principal credentials loaded by terraform/deploy.ps1.
+.env.ps1
+.env
+*.pem
+*.pfx
+*.key
+
+# Terraform state holds real values, including storage and Cosmos account keys.
+*.tfstate
+*.tfstate.*
+terraform/old-commercial-state/
+.terraform/
+crash.log
+crash.*.log
+
+# Real values for this environment. The .example files are committed instead.
+terraform.tfvars
+*.auto.tfvars
+local.settings.json
+
+# --- Build output ------------------------------------------------------------
+bin/
+obj/
+*.zip
+publish/
+
+# --- Local emulators and scratch ---------------------------------------------
+__azurite_db_*.json
+__blobstorage__/
+__queuestorage__/
+AzuriteConfig
+adversarial_test.txt
+
+# --- Editor and OS -----------------------------------------------------------
+.vscode/
+.vs/
+.DS_Store
+Thumbs.db

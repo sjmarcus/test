@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "powershell",
+    "SUBSCRIPTION_ID": "<sub-guid>",
+    "KEY_VAULT_URI": "https://kv-wbhkrnw-xxxxx.vault.azure.net/",
+    "AZURE_ENVIRONMENT": "AzureCloud",
+    "KEY_VAULT_SECRET_NAME": "automation-webhook-url",
+    "AUTOMATION_ACCOUNT_RESOURCE_GROUP": "rg-my-existing-automation",
+    "AUTOMATION_ACCOUNT_NAME": "aa-my-existing-account",
+    "RUNBOOK_NAME": "My-Existing-Runbook",
+    "WEBHOOK_NAME": "spike-renewable-webhook",
+    "RENEWAL_LEAD_DAYS": "14"
+  }
+}

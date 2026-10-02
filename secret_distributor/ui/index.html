@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secret Registry</title>
+<style nonce="{{nonce}}">
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5b6570; --line: #d8dde3;
+    --accent: #1f6feb; --accent-text: #ffffff; --danger: #c62828; --warn-bg: #fff4d6;
+    --err-bg: #fde8e8; --focus: #1f6feb55;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12161b; --panel: #1b2027; --text: #e6e9ed; --muted: #97a1ac; --line: #2c343d;
+      --accent: #4c8dff; --accent-text: #0b1220; --danger: #ff6b6b; --warn-bg: #3a3116;
+      --err-bg: #3b1d1d; --focus: #4c8dff66;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; gap: 12px; align-items: center; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  header a { color: var(--accent); }
+  main { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; }
+  h2 { font-size: 14px; margin: 0 0 10px; }
+  input[type=text], input[type=search] { width: 100%; padding: 6px 8px; background: var(--bg); color: inherit; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+  input:disabled { opacity: .6; }
+  input:focus, button:focus-visible, summary:focus-visible { outline: 3px solid var(--focus); }
+  button { font: inherit; color: inherit; padding: 6px 12px; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.danger { color: var(--danger); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .grow { flex: 1; }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .banner { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+  .banner.err { background: var(--err-bg); border: 1px solid var(--danger); }
+  .banner.info { background: var(--warn-bg); border: 1px solid var(--line); }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+  ul.list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 65vh; overflow: auto; }
+  ul.list button { width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 8px 6px; }
+  ul.list button[aria-current=true] { background: var(--focus); }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--danger); color: var(--danger); margin-left: 6px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  .field { margin-bottom: 12px; }
+  .target { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; align-items: end; padding: 8px 0 4px; }
+  @media (max-width: 760px) { .target { grid-template-columns: 1fr; } }
+  .target details { grid-column: 1 / -1; }
+  details > summary { cursor: pointer; color: var(--muted); font-size: 12px; margin: 6px 0; }
+  details.more { margin: 14px 0; border-top: 1px solid var(--line); padding-top: 6px; }
+  details.more .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .actions { margin-top: 14px; display: flex; gap: 8px; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Secret Registry</h1>
+  <span id="who" class="small muted"></span>
+  <a class="small" href="/.auth/logout?post_logout_redirect_uri=/api/ui">Sign out</a>
+</header>
+
+<main>
+  <section aria-labelledby="list-h">
+    <div class="row">
+      <h2 id="list-h" class="grow" style="margin:0">Secrets</h2>
+      <button id="new" hidden>New</button>
+    </div>
+    <div style="margin-top:8px"><input id="filter" type="search" placeholder="Filter" aria-label="Filter secrets"></div>
+    <ul id="list" class="list"></ul>
+  </section>
+
+  <section aria-labelledby="editor-h">
+    <h2 id="editor-h">Details</h2>
+    <div id="banners"></div>
+    <div id="editor" class="muted">Loading…</div>
+  </section>
+</main>
+
+<script nonce="{{nonce}}">
+'use strict';
+// All server-supplied text is written with textContent, never innerHTML, so a
+// hostile registry value cannot inject markup or script into this page.
+//
+// There is no key or login code here: App Service Authentication signs the user
+// in before this page is even served, and the browser's session cookie
+// authenticates every call below. The API decides what the user's role allows.
+
+const API = location.origin + '/api';
+const $ = (id) => document.getElementById(id);
+
+let me = null;        // { name, role, canEdit, canDelete }
+let entries = [];
+let current = null;   // { isNew, etag, data }
+let dirty = false;
+
+function el(tag, attrs, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k === 'class') node.className = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) node.append(kid instanceof Node ? kid : document.createTextNode(kid ?? ''));
+  return node;
+}
+
+function banner(kind, message, details, extra) {
+  const box = el('div', { class: `banner ${kind}`, role: kind === 'err' ? 'alert' : 'status' }, message);
+  if (details && details.length) box.append(el('ul', {}, details.map((d) => el('li', {}, d))));
+  if (extra) box.append(el('div', { style: 'margin-top:8px' }, extra));
+  $('banners').replaceChildren(box);
+}
+const clearBanners = () => $('banners').replaceChildren();
+
+// --- API ---------------------------------------------------------------------
+
+// An expired session makes the platform answer with a redirect to the sign-in
+// page. fetch cannot follow that cross-origin, so ask for it not to and treat
+// the resulting opaque redirect as "sign in again".
+async function api(method, path, body, etag) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (etag) headers['If-Match'] = etag;
+  let res;
+  try {
+    res = await fetch(API + path, { method, headers, redirect: 'manual', credentials: 'same-origin',
+      body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch { return sessionExpired(); }
+  if (res.type === 'opaqueredirect') return sessionExpired();
+
+  let data = null;
+  const text = await res.text();
+  if (text) { try { data = JSON.parse(text); } catch { data = { error: text.slice(0, 200) }; } }
+  return { status: res.status, ok: res.ok, data };
+}
+
+function sessionExpired() {
+  banner('err', 'Your session has expired.', null, el('button', { type: 'button', onclick: () => location.reload() }, 'Sign in again'));
+  return { status: 0, ok: false, data: { error: 'session expired' }, expired: true };
+}
+
+const explain = (res) => (res.data && res.data.error) || `Request failed (HTTP ${res.status}).`;
+
+// --- start-up ----------------------------------------------------------------
+
+async function init() {
+  const res = await api('GET', '/me');
+  if (!res.ok) {
+    if (!res.expired) banner('err', explain(res));
+    $('editor').textContent = '';
+    return;
+  }
+  me = res.data;
+  $('who').textContent = `${me.name} · ${me.role === 'None' ? 'no role' : me.role}`;
+
+  if (me.role === 'None') {
+    $('editor').className = '';
+    $('editor').textContent = 'You are signed in but have no registry role. Ask an admin to assign you one.';
+    return;
+  }
+  $('new').hidden = !me.canEdit;
+  $('editor').textContent = 'Select a secret, or create a new one.';
+  await loadList();
+}
+
+// --- list --------------------------------------------------------------------
+
+async function loadList(selectId) {
+  const res = await api('GET', '/registry');
+  if (!res.ok) { if (!res.expired) banner('err', explain(res)); return false; }
+  entries = res.data;
+  renderList();
+  if (selectId) await select(selectId, true);
+  return true;
+}
+
+function renderList() {
+  const q = $('filter').value.trim().toLowerCase();
+  const shown = entries.filter((e) =>
+    !q || e.id.toLowerCase().includes(q) || (e.targets || []).some((t) => (t.repo || '').toLowerCase().includes(q)));
+  $('list').replaceChildren(...shown.map((e) => {
+    const n = (e.targets || []).length;
+    return el('li', {}, el('button', {
+      type: 'button', 'aria-current': current && !current.isNew && current.data.id === e.id,
+      onclick: () => select(e.id),
+    }, el('strong', {}, e.id), e.enabled ? '' : el('span', { class: 'tag' }, 'paused'),
+       el('div', { class: 'small muted' }, `${n} target${n === 1 ? '' : 's'}`)));
+  }));
+  if (!shown.length) $('list').append(el('li', { class: 'muted small', style: 'padding:8px 6px' }, entries.length ? 'No matches.' : 'Nothing here yet.'));
+}
+
+const confirmDiscard = () => !dirty || confirm('You have unsaved changes. Discard them?');
+
+async function select(id, force) {
+  if (!force && !confirmDiscard()) return;
+  const res = await api('GET', '/registry/' + encodeURIComponent(id));
+  if (!res.ok) { if (!res.expired) banner('err', explain(res)); return; }
+  current = { isNew: false, etag: res.data._etag, data: res.data };
+  dirty = false;
+  clearBanners();
+  renderList();
+  renderEditor();
+  loadState(id);
+}
+
+const blankTarget = (like) => ({ repo: '', environment: '', secretName: like ? like.secretName : '', tokenSecret: '' });
+
+function startNew() {
+  if (!confirmDiscard()) return;
+  current = { isNew: true, etag: null, data: { id: '', enabled: true, targets: [blankTarget()] } };
+  dirty = false;
+  clearBanners();
+  renderList();
+  renderEditor();
+}
+
+// --- editor ------------------------------------------------------------------
+
+function textField(labelText, id, value, opts = {}) {
+  const input = el('input', { type: 'text', id, value: value ?? '', disabled: opts.disabled, placeholder: opts.placeholder, autocomplete: 'off', spellcheck: 'false' });
+  input.addEventListener('input', () => { dirty = true; });
+  return el('div', { class: opts.wrap === false ? '' : 'field' }, el('label', { for: id }, labelText), input);
+}
+
+function renderEditor() {
+  const d = current.data;
+  const canEdit = me.canEdit;
+  const form = el('form', { novalidate: true });
+  form.addEventListener('submit', (e) => { e.preventDefault(); save(); });
+
+  const enabled = el('input', { type: 'checkbox', id: 'f-enabled', checked: d.enabled !== false });
+  enabled.addEventListener('change', () => { dirty = true; });
+
+  form.append(
+    textField('Key Vault secret name', 'f-id', d.id, { disabled: !current.isNew, placeholder: 'e.g. S-EITAAS-ARCYBER' }),
+    el('div', { class: 'field row' }, enabled, el('label', { for: 'f-enabled', style: 'margin:0' }, 'Send this secret to the targets below')),
+    el('h2', {}, 'Where it goes'),
+    el('div', { id: 'targets' }, (d.targets || []).map(targetRow)));
+
+  if (canEdit) form.append(el('button', { type: 'button', onclick: addTarget }, '+ Add target'));
+
+  form.append(el('details', { class: 'more' },
+    el('summary', {}, 'More details (optional)'),
+    el('div', { class: 'grid' },
+      textField('Display name', 'f-displayName', d.displayName, { wrap: false }),
+      textField('Owner', 'f-owner', d.owner, { wrap: false }),
+      textField('Subscription ID', 'f-subscriptionId', d.subscriptionId, { placeholder: 'GUID', wrap: false }),
+      textField('Client ID', 'f-clientId', d.clientId, { placeholder: 'GUID', wrap: false }))));
+
+  if (canEdit) {
+    form.append(el('div', { class: 'actions' },
+      me.canDelete && !current.isNew ? el('button', { type: 'button', class: 'danger', onclick: remove }, 'Delete') : '',
+      el('span', { class: 'spacer' }),
+      el('button', { type: 'submit', class: 'primary' }, current.isNew ? 'Create' : 'Save')));
+  } else {
+    form.append(el('p', { class: 'small muted' }, 'You have read-only access.'));
+    form.querySelectorAll('input').forEach((i) => { i.disabled = true; });
+  }
+
+  if (!current.isNew && d.updatedUtc)
+    form.append(el('p', { class: 'small muted' }, `Last changed ${new Date(d.updatedUtc).toLocaleString()}${d.updatedBy ? ' by ' + d.updatedBy : ''}.`));
+
+  if (!current.isNew)
+    form.append(el('details', {}, el('summary', {}, 'Last sent to GitHub'), el('div', { id: 'state-body' }, 'Loading…')));
+
+  $('editor').className = '';
+  $('editor').replaceChildren(form);
+}
+
+function targetRow(t, i) {
+  const input = (k, label, ph) => {
+    const box = el('input', { type: 'text', 'data-k': k, value: t[k] ?? '', placeholder: ph, autocomplete: 'off', spellcheck: 'false', 'aria-label': `Target ${i + 1} ${label}` });
+    box.addEventListener('input', () => { dirty = true; });
+    return el('div', {}, el('label', {}, label), box);
+  };
+  return el('div', { class: 'target' },
+    input('repo', 'Repository', 'name or owner/repo'),
+    input('environment', 'Environment', 'blank = whole repo'),
+    input('secretName', 'GitHub secret name', 'AZURE_CLIENT_SECRET'),
+    me.canEdit ? el('button', { type: 'button', class: 'danger', 'aria-label': `Remove target ${i + 1}`, onclick: () => removeTarget(i) }, 'Remove') : el('span'),
+    el('details', { open: !!t.tokenSecret }, el('summary', {}, 'Use a different GitHub token'),
+       input('tokenSecret', 'Key Vault secret holding the token', 'leave blank for the default')));
+}
+
+// Read the form back into a plain object. Blank optional fields are omitted so
+// the server never stores empty strings where it expects "not set". The target
+// type is not asked for: an environment means an environment secret, no
+// environment means a repository secret.
+function collect() {
+  const v = (id) => $(id).value.trim() || undefined;
+  const targets = [...document.querySelectorAll('#targets .target')].map((row) => {
+    const g = (k) => row.querySelector(`[data-k=${k}]`).value.trim() || undefined;
+    const environment = g('environment');
+    return { type: environment ? 'github-environment' : 'github-actions', repo: g('repo') ?? '', environment,
+             secretName: g('secretName') ?? '', tokenSecret: g('tokenSecret') };
+  });
+  return {
+    id: current.isNew ? $('f-id').value.trim() : current.data.id,
+    displayName: v('f-displayName'), owner: v('f-owner'),
+    subscriptionId: v('f-subscriptionId'), clientId: v('f-clientId'),
+    enabled: $('f-enabled').checked, targets,
+  };
+}
+
+function addTarget() {
+  current.data = { ...current.data, ...collect() };
+  const last = current.data.targets[current.data.targets.length - 1];
+  current.data.targets.push(blankTarget(last)); // new rows inherit the last secret name
+  renderEditor(); dirty = true;
+}
+
+function removeTarget(i) {
+  current.data = { ...current.data, ...collect() };
+  current.data.targets.splice(i, 1);
+  renderEditor(); dirty = true;
+}
+
+// --- save / delete -----------------------------------------------------------
+
+async function save() {
+  const body = collect();
+  if (!body.id) { banner('err', 'Enter the Key Vault secret name.'); return; }
+  const wasNew = current.isNew;
+  const res = await api('PUT', '/registry/' + encodeURIComponent(body.id), body, wasNew ? undefined : current.etag);
+
+  if (res.ok) {
+    dirty = false;
+    await loadList(body.id); // re-selects the entry, which picks up the new ETag
+    banner('info', wasNew ? 'Created.' : 'Saved.');
+    return;
+  }
+  if (res.expired) return;
+  if (res.status === 412) {
+    banner('err', res.data.error, null,
+      el('button', { type: 'button', onclick: () => { dirty = false; select(body.id, true); } }, 'Discard my changes and reload'));
+    return;
+  }
+  banner('err', explain(res), res.data && res.data.details);
+}
+
+async function remove() {
+  const id = current.data.id;
+  const typed = prompt(`This removes '${id}' from the registry. The Key Vault secret itself is not touched.\n\nType the name to confirm:`);
+  if (typed !== id) return;
+  const res = await api('DELETE', '/registry/' + encodeURIComponent(id), undefined, current.etag);
+  if (!res.ok) { if (!res.expired) banner('err', explain(res)); return; }
+  current = null; dirty = false;
+  $('editor').className = 'muted';
+  $('editor').textContent = `Removed '${id}'.`;
+  clearBanners();
+  loadList();
+}
+
+// --- last distributed --------------------------------------------------------
+
+async function loadState(id) {
+  const res = await api('GET', '/state/' + encodeURIComponent(id));
+  const box = $('state-body');
+  if (!box) return; // the user moved on
+  if (res.status === 404) { box.textContent = 'Nothing has been sent yet.'; return; }
+  if (!res.ok) { box.textContent = explain(res); return; }
+
+  const rows = (res.data.targets || []).map((t) => el('tr', {},
+    el('td', {}, t.repo + (t.environment ? ` (${t.environment})` : '')), el('td', {}, t.secretName),
+    el('td', {}, t.pushedUtc ? new Date(t.pushedUtc).toLocaleString() : ''), el('td', {}, t.version || '')));
+  box.replaceChildren(
+    el('table', {}, el('thead', {}, el('tr', {}, ['Target', 'Secret', 'Sent', 'Key Vault version'].map((h) => el('th', {}, h)))), el('tbody', {}, rows)),
+    el('p', { class: 'small muted' }, 'GitHub cannot be read back, so this is the only record of what it was given.'));
+}
+
+// --- wiring ------------------------------------------------------------------
+
+$('new').addEventListener('click', startNew);
+$('filter').addEventListener('input', renderList);
+window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+init();
+</script>
+</body>
+</html>
