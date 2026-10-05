@@ -1,5 +1,7 @@
 using System.Net;
 using System.Text.Json;
+using Azure;
+using Azure.Security.KeyVault.Secrets;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -14,6 +16,7 @@ namespace SecretDistributor;
 ///   GET    /api/registry            list entries                  Reader
 ///   GET    /api/registry/{id}       one entry (ETag in the body)  Reader
 ///   PUT    /api/registry/{id}       create, or update with If-Match   Editor
+///                                   (pushes the current value to any target not yet pushed)
 ///   DELETE /api/registry/{id}       remove                        Admin
 ///   GET    /api/state/{id}          what was last pushed          Reader
 ///
@@ -33,11 +36,13 @@ public class RegistryApi
     };
 
     private readonly RegistryStore _store;
+    private readonly SecretPusher _pusher;
     private readonly ILogger<RegistryApi> _log;
 
-    public RegistryApi(RegistryStore store, ILogger<RegistryApi> log)
+    public RegistryApi(RegistryStore store, SecretPusher pusher, ILogger<RegistryApi> log)
     {
         _store = store;
+        _pusher = pusher;
         _log = log;
     }
 
@@ -106,7 +111,15 @@ public class RegistryApi
             var saved = await _store.SaveEntryAsync(entry, ifMatch, caller.Name, ct);
             _log.LogInformation("Registry entry '{Id}' {Action} by {Caller} with {Count} target(s).",
                 saved.Id, ifMatch is null ? "created" : "updated", caller.Name, saved.Targets.Count);
-            return await Reply(req, ifMatch is null ? HttpStatusCode.Created : HttpStatusCode.OK, saved, saved.ETag);
+
+            // The entry is saved; pushing is best-effort on top of it. A secret
+            // that will not rotate for months must not wait for a new version
+            // to reach a newly added repository.
+            var distribution = await PushNewTargetsAsync(saved, ct);
+
+            var body = JsonSerializer.SerializeToNode(saved, Json)!.AsObject();
+            body["distribution"] = JsonSerializer.SerializeToNode(distribution, Json);
+            return await Reply(req, ifMatch is null ? HttpStatusCode.Created : HttpStatusCode.OK, body, saved.ETag);
         });
 
     [Function("Registry_Delete")]
@@ -133,6 +146,68 @@ public class RegistryApi
                 ? await Problem(req, HttpStatusCode.NotFound, $"Nothing has been distributed for '{id}' yet.")
                 : await Reply(req, HttpStatusCode.OK, state, state.ETag);
         });
+
+    // --- distribution on save ----------------------------------------------
+
+    /// <summary>
+    /// Pushes the secret's CURRENT value to targets that have never been pushed
+    /// (no recorded state), so adding a repository takes effect now instead of
+    /// at the next new version. Targets that already have state are left alone.
+    /// Never throws: the entry is already saved, so a failure here is reported
+    /// in the response rather than turned into an error for a write that
+    /// succeeded. A failed target has no state, so saving again retries it, and
+    /// the next new version pushes to every target regardless.
+    /// </summary>
+    private async Task<object> PushNewTargetsAsync(RegistryEntry saved, CancellationToken ct)
+    {
+        try
+        {
+            if (!saved.Enabled)
+                return new { status = "skipped", message = "Entry is disabled; nothing was pushed." };
+
+            var recorded = (await _store.GetStateAsync(saved.Id, ct))?.Targets.Select(t => t.Key).ToHashSet()
+                           ?? new HashSet<string>();
+            var pending = saved.Targets.Where(t => !recorded.Contains(t.Key)).ToList();
+            if (pending.Count == 0)
+                return new { status = "none", message = "No new targets to push." };
+
+            var vaultUri = SecretPusher.VaultUri;
+            if (string.IsNullOrWhiteSpace(vaultUri))
+                return new { status = "skipped", message = "KEY_VAULT_URI is not set; nothing was pushed." };
+
+            var vault = SecretPusher.OpenVault(vaultUri);
+            KeyVaultSecret secret;
+            try
+            {
+                secret = await vault.GetSecretAsync(saved.Id, cancellationToken: ct);
+            }
+            catch (RequestFailedException ex) when (ex.Status is 403 or 404)
+            {
+                _log.LogWarning(ex, "Registry entry '{Id}' saved but its Key Vault secret could not be read (HTTP {Status}).",
+                    saved.Id, ex.Status);
+                return new
+                {
+                    status = "skipped",
+                    message = ex.Status == 404
+                        ? "No Key Vault secret with this name exists yet. New targets will be pushed when its first version is created."
+                        : "The app cannot read this Key Vault secret, so nothing was pushed.",
+                };
+            }
+
+            var result = await _pusher.PushAsync(vault, secret, saved, pending, ct);
+            return new
+            {
+                status = result.Targets.All(t => t.Status == "pushed") ? "pushed" : "partial",
+                message = (string?)null,
+                targets = result.Targets,
+            };
+        }
+        catch (Exception ex) when (ex is RequestFailedException or CosmosException)
+        {
+            _log.LogError(ex, "Registry entry '{Id}' saved but pushing its new targets failed.", saved.Id);
+            return new { status = "failed", message = "The entry was saved, but pushing to its new targets failed. Save again to retry." };
+        }
+    }
 
     // --- plumbing ----------------------------------------------------------
 

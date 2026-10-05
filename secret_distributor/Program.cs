@@ -12,6 +12,7 @@ var host = new HostBuilder()
 
         // One CosmosClient for the life of the worker; see RegistryStore.
         services.AddSingleton<SecretDistributor.RegistryStore>();
+        services.AddSingleton<SecretDistributor.SecretPusher>();
         services.AddApplicationInsightsTelemetryWorkerService();
         services.ConfigureFunctionsApplicationInsights();
     })

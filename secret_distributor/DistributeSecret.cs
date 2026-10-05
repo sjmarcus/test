@@ -1,8 +1,6 @@
 using System.Text.Json;
 using Azure;
-using Azure.Identity;
 using Azure.Security.KeyVault.Secrets;
-using Microsoft.Azure.Cosmos;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 
@@ -16,6 +14,10 @@ namespace SecretDistributor;
 /// another process created. That decoupling is the point: distribution does
 /// not need to own the rotation to keep consumers current, and a failed push
 /// can be replayed by re-firing the event without rotating again.
+///
+/// Targets added to an existing entry are pushed straight away by the registry
+/// API (see <see cref="RegistryApi"/>), so they do not wait for the next version.
+/// Both paths push through <see cref="SecretPusher"/>.
 ///
 /// Where the targets come from, in order:
 ///   1. The registry (Cosmos) entry whose id is the secret name. Supports
@@ -33,14 +35,14 @@ namespace SecretDistributor;
 public class DistributeSecret
 {
     private readonly ILogger<DistributeSecret> _log;
-    private readonly IHttpClientFactory _httpFactory;
     private readonly RegistryStore _registry;
+    private readonly SecretPusher _pusher;
 
-    public DistributeSecret(ILogger<DistributeSecret> log, IHttpClientFactory httpFactory, RegistryStore registry)
+    public DistributeSecret(ILogger<DistributeSecret> log, RegistryStore registry, SecretPusher pusher)
     {
         _log = log;
-        _httpFactory = httpFactory;
         _registry = registry;
+        _pusher = pusher;
     }
 
     [Function(nameof(DistributeSecret))]
@@ -55,7 +57,7 @@ public class DistributeSecret
             return;
         }
 
-        var vaultUri = Environment.GetEnvironmentVariable("KEY_VAULT_URI");
+        var vaultUri = SecretPusher.VaultUri;
         if (string.IsNullOrWhiteSpace(vaultUri))
         {
             // Deterministic: retrying will not conjure an app setting.
@@ -63,7 +65,7 @@ public class DistributeSecret
             return;
         }
 
-        var client = new SecretClient(new Uri(vaultUri), new DefaultAzureCredential());
+        var client = SecretPusher.OpenVault(vaultUri);
 
         KeyVaultSecret secret;
         try
@@ -79,7 +81,6 @@ public class DistributeSecret
         }
 
         var tags = secret.Properties.Tags;
-        var defaultTokenSecret = Environment.GetEnvironmentVariable("GITHUB_TOKEN_SECRET_NAME") ?? "github-pat";
 
         // Cosmos failures are deliberately NOT caught: throttling, a transient
         // 5xx, or RBAC that has not propagated yet all clear on a later attempt,
@@ -129,148 +130,11 @@ public class DistributeSecret
             return;
         }
 
-        var github = new GitHubSecretClient(_httpFactory.CreateClient("github"), _log);
-        var tokens = new Dictionary<string, string?>(); // one Key Vault read per distinct PAT
-        var pushed = new List<TargetState>();
-        var retryable = 0;
+        var result = await _pusher.PushAsync(client, secret, entry, targets, ct);
 
-        foreach (var target in targets)
-        {
-            // Registry entries are validated on write, but legacy tags never were.
-            var problems = target.Validate();
-            if (problems.Count > 0)
-            {
-                _log.LogError("Secret '{Secret}' has an invalid target ({Problems}). Not retrying it.",
-                    secretName, string.Join("; ", problems));
-                continue;
-            }
-
-            // The token is named by the target so different teams' repositories
-            // can use separately scoped PATs. It names a Key Vault SECRET, never
-            // the token itself — a token in a tag or document would be readable
-            // by anyone who can list secret properties.
-            var tokenSecretName = target.TokenSecret ?? defaultTokenSecret;
-            if (!tokens.TryGetValue(tokenSecretName, out var token))
-            {
-                token = await ReadTokenAsync(client, tokenSecretName, ct);
-                tokens[tokenSecretName] = token;
-            }
-            if (token is null) continue; // already logged; permanent until someone fixes the secret
-
-            try
-            {
-                var keyId = await github.SetSecretAsync(
-                    target.FullRepo, target.Environment, target.SecretName, secret.Value, token, ct);
-                pushed.Add(new TargetState
-                {
-                    Repo = target.FullRepo,
-                    Environment = target.Environment,
-                    SecretName = target.SecretName,
-                    Version = secret.Properties.Version,
-                    PushedUtc = DateTime.UtcNow,
-                    KeyId = keyId,
-                });
-                _log.LogInformation(
-                    "Distributed '{Secret}' to {Repo} (environment: {Environment}) as '{Target}' using token from '{TokenSecret}'.",
-                    secretName, target.FullRepo, target.Environment ?? "none", target.SecretName, tokenSecretName);
-            }
-            catch (InvalidOperationException ex)
-            {
-                // Transient (5xx, network) vs permanent (401/403/404) is hard to
-                // separate reliably from the message, so let Event Grid retry —
-                // a repeated push of the same value is harmless, since setting
-                // an Actions secret is idempotent.
-                _log.LogError(ex, "Distribution of '{Secret}' to {Repo} failed; allowing retry.", secretName, target.FullRepo);
-                retryable++;
-            }
-        }
-
-        // Record what was distributed BEFORE surfacing failures, so targets that
-        // succeeded are noted even when a sibling failed. Actions secrets cannot
-        // be read back, so this is the only way to tell what GitHub holds.
-        if (pushed.Count > 0)
-            await RecordAsync(entry, secret, client, secretName, pushed, ct);
-
-        if (retryable > 0)
+        if (result.Retryable > 0)
             throw new InvalidOperationException(
-                $"{retryable} of {targets.Count} target(s) for '{secretName}' failed; retrying the event.");
-    }
-
-    /// <summary>
-    /// Registry-backed secrets record state in Cosmos; legacy tag-driven ones
-    /// keep using tags. Failing to record never fails the run: the push already
-    /// happened, and retrying would re-push a value GitHub already has.
-    /// </summary>
-    private async Task RecordAsync(
-        RegistryEntry? entry, KeyVaultSecret secret, SecretClient client,
-        string secretName, List<TargetState> pushed, CancellationToken ct)
-    {
-        try
-        {
-            if (entry is not null)
-            {
-                var state = await _registry.GetStateAsync(secretName, ct) ?? new SecretState { Id = secretName };
-
-                // Merge over what is already recorded, then drop targets that
-                // are no longer in the entry so stale rows do not linger.
-                foreach (var p in pushed)
-                {
-                    state.Targets.RemoveAll(t => t.Key == p.Key);
-                    state.Targets.Add(p);
-                }
-                var current = entry.Targets.Select(x => x.Key).ToHashSet();
-                state.Targets.RemoveAll(t => !current.Contains(t.Key));
-
-                await _registry.UpsertStateAsync(state, ct);
-            }
-            else
-            {
-                var p = pushed[0]; // legacy tags carry exactly one target
-                secret.Properties.Tags["LAST-PUSHED-VERSION"] = p.Version ?? "";
-                secret.Properties.Tags["LAST-PUSHED-UTC"] = p.PushedUtc!.Value.ToString("o");
-                secret.Properties.Tags["LAST-PUSHED-KEY-ID"] = p.KeyId ?? "";
-                await client.UpdateSecretPropertiesAsync(secret.Properties, ct);
-            }
-        }
-        catch (Exception ex) when (ex is RequestFailedException or CosmosException)
-        {
-            _log.LogWarning(ex, "Pushed '{Secret}' but could not record the result.", secretName);
-        }
-    }
-
-    /// <summary>Returns the trimmed PAT, or null (after logging why) when it is unusable.</summary>
-    private async Task<string?> ReadTokenAsync(SecretClient client, string tokenSecretName, CancellationToken ct)
-    {
-        string token;
-        try
-        {
-            token = (await client.GetSecretAsync(tokenSecretName, cancellationToken: ct)).Value.Value;
-        }
-        catch (RequestFailedException ex)
-        {
-            _log.LogError(ex, "Could not read the GitHub token from secret '{Token}' (HTTP {Status}).",
-                tokenSecretName, ex.Status);
-            return null;
-        }
-
-        // A PAT pasted from a multi-line source carries a trailing newline, and
-        // .NET refuses newlines in header values — which surfaces as an opaque
-        // "New-line characters are not allowed in header values" far from the
-        // cause. Normalise here and fail with something that names the problem.
-        token = token?.Trim() ?? string.Empty;
-        if (string.IsNullOrEmpty(token))
-        {
-            _log.LogError("GitHub token in secret '{Token}' is empty after trimming. Not retrying.", tokenSecretName);
-            return null;
-        }
-        if (token.Any(c => char.IsControl(c)))
-        {
-            _log.LogError(
-                "GitHub token in secret '{Token}' contains control characters and cannot be used as a header value. " +
-                "Re-store it as a single line. Not retrying.", tokenSecretName);
-            return null;
-        }
-        return token;
+                $"{result.Retryable} of {targets.Count} target(s) for '{secretName}' failed; retrying the event.");
     }
 
     private static bool TryGetTag(IDictionary<string, string> tags, string key, out string? value)

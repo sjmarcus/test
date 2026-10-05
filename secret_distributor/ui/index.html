@@ -333,8 +333,16 @@ async function save() {
 
   if (res.ok) {
     dirty = false;
+    const dist = res.data && res.data.distribution;
     await loadList(body.id); // re-selects the entry, which picks up the new ETag
-    banner('info', wasNew ? 'Created.' : 'Saved.');
+    const saved = wasNew ? 'Created.' : 'Saved.';
+    const lines = dist && dist.targets
+      ? dist.targets.map((t) => `${t.repo}${t.environment ? ' (' + t.environment + ')' : ''} → ${t.secretName}: ${t.status}${t.message ? ' — ' + t.message : ''}`)
+      : [];
+    if (dist && dist.status === 'pushed') banner('info', `${saved} Pushed the current value to ${lines.length} new target(s).`, lines);
+    else if (dist && (dist.status === 'partial' || dist.status === 'failed' || dist.status === 'skipped'))
+      banner('err', `${saved} ${dist.message || 'Some new targets were not pushed.'}`, lines);
+    else banner('info', saved);
     return;
   }
   if (res.expired) return;
