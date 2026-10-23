@@ -1,4 +1,4 @@
-name: oidc-proof
+name: pool-app-login
 on: workflow_dispatch
 
 permissions:
@@ -8,16 +8,13 @@ permissions:
 jobs:
   login:
     runs-on: ubuntu-latest
-    environment: Production
+    environment: Development
     steps:
-      - name: Azure login (Azure Government)
-        uses: azure/login@v2
+      - uses: azure/login@v2
         with:
-            client-id: b1394c41-f81e-432f-85a3-ba9850ff86f8
-            tenant-id: ff15d661-959b-4d28-a340-a5251c312c3f
-            allow-no-subscriptions: true
-            environment: AzureUSGovernment
-            audience: api://AzureADTokenExchangeUSGov
-
-      - name: Show who we are
-        run: az account show --query "{tenant:tenantId, identity:user.name, type:user.type}" -o json
+          client-id: 94ee7029-53d1-4bdc-9877-e7ab4728e0a5      # registry-sp-dev-01
+          tenant-id: ff15d661-959b-4d28-a340-a5251c312c3f
+          allow-no-subscriptions: true
+          environment: AzureUSGovernment
+          audience: api://AzureADTokenExchangeUSGov
+      - run: az account show --query "{tenant:tenantId, identity:user.name, type:user.type}" -o json
