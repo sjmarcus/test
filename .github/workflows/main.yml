@@ -1,0 +1,17 @@
+name: show-oidc-sub
+on: workflow_dispatch
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  show:
+    runs-on: ubuntu-latest
+    environment: Production        # GitHub creates the environment on first use if it doesn't exist
+    steps:
+      - name: Print the sub claim
+        run: |
+          TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          echo "::add-mask::$TOKEN"
+          echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+' | { read -r s; while [ $(( ${#s} % 4 )) -ne 0 ]; do s="$s="; done; echo "$s" | base64 -d; } \
+            | jq '{iss, sub, aud, repository, repository_id, repository_owner_id, environment}'
