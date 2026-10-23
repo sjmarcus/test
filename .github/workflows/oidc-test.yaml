@@ -13,11 +13,11 @@ jobs:
       - name: Azure login (Azure Government)
         uses: azure/login@v2
         with:
-          client-id: c0523a2c-039c-4167-b2ef-ec966495e6aa
-          tenant-id: ff15d661-959b-4d28-a340-a5251c312c3f
-          allow-no-subscriptions: true
-          environment: AzureUSGovernment
-          audience: api://AzureADTokenExchangeUSGov
+            client-id: b1394c41-f81e-432f-85a3-ba9850ff86f8
+            tenant-id: ff15d661-959b-4d28-a340-a5251c312c3f
+            allow-no-subscriptions: true
+            environment: AzureUSGovernment
+            audience: api://AzureADTokenExchangeUSGov
 
       - name: Show who we are
         run: az account show --query "{tenant:tenantId, identity:user.name, type:user.type}" -o json
